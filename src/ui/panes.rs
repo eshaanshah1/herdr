@@ -270,7 +270,7 @@ pub(super) fn render_panes(
         multi_pane && app.separator_style == crate::config::PaneSeparators::Divider;
 
     if divider_mode {
-        let color = app.separator_color.unwrap_or(app.palette.overlay0);
+        let color = app.separator_color.unwrap_or(app.palette.surface_dim);
         render_pane_dividers(frame, area, &ws.layout.splits(area), color);
     }
 
