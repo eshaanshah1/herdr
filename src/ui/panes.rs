@@ -1,5 +1,7 @@
+use std::collections::HashMap;
+
 use ratatui::{
-    layout::Rect,
+    layout::{Direction, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
@@ -10,7 +12,7 @@ use super::scrollbar::{render_pane_scrollbar, should_show_scrollbar};
 use super::widgets::panel_contrast_fg;
 use crate::app::state::Palette;
 use crate::app::{AppState, Mode};
-use crate::layout::PaneInfo;
+use crate::layout::{PaneInfo, SplitBorder};
 use crate::terminal::{TerminalRuntime, TerminalRuntimeRegistry};
 
 pub(crate) fn pane_is_scrolled_back(rt: &TerminalRuntime) -> bool {
@@ -162,6 +164,8 @@ pub(super) fn compute_pane_infos(
 
     let multi_pane = ws.layout.pane_count() > 1;
     let terminal_active = app.mode == Mode::Terminal;
+    let divider_mode =
+        multi_pane && app.separator_style == crate::config::PaneSeparators::Divider;
 
     if ws.zoomed {
         let focused_id = ws.layout.focused();
@@ -195,7 +199,20 @@ pub(super) fn compute_pane_infos(
     let mut pane_infos = ws.layout.panes(area);
 
     for info in &mut pane_infos {
-        let pane_inner = if multi_pane {
+        let pane_inner = if !multi_pane {
+            area
+        } else if divider_mode {
+            // Flush content; reserve one cell on interior right/bottom edges
+            // for the shared divider line (the left/top pane yields the column).
+            let mut r = info.rect;
+            if info.rect.x + info.rect.width < area.x + area.width {
+                r.width = r.width.saturating_sub(1);
+            }
+            if info.rect.y + info.rect.height < area.y + area.height {
+                r.height = r.height.saturating_sub(1);
+            }
+            r
+        } else {
             let border_set = if info.is_focused && terminal_active {
                 ratatui::symbols::border::THICK
             } else {
@@ -205,8 +222,6 @@ pub(super) fn compute_pane_infos(
                 .borders(Borders::ALL)
                 .border_set(border_set);
             block.inner(info.rect)
-        } else {
-            area
         };
 
         let mut inner_rect = pane_inner;
@@ -251,10 +266,18 @@ pub(super) fn render_panes(
 
     let multi_pane = ws.layout.pane_count() > 1;
     let terminal_active = app.mode == Mode::Terminal;
+    let divider_mode =
+        multi_pane && app.separator_style == crate::config::PaneSeparators::Divider;
+
+    if divider_mode {
+        let color = app.separator_color.unwrap_or(app.palette.surface_dim);
+        render_pane_dividers(frame, area, &ws.layout.splits(area), color);
+    }
 
     for info in &app.view.pane_infos {
         if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id) {
-            if multi_pane {
+            if multi_pane && !divider_mode {
+                let inactive_border = app.separator_color.unwrap_or(app.palette.overlay0);
                 let (border_style, border_set) = if info.is_focused && terminal_active {
                     (
                         Style::default().fg(app.palette.accent),
@@ -267,7 +290,7 @@ pub(super) fn render_panes(
                     )
                 } else {
                     (
-                        Style::default().fg(app.palette.overlay0),
+                        Style::default().fg(inactive_border),
                         ratatui::symbols::border::PLAIN,
                     )
                 };
@@ -319,6 +342,81 @@ pub(super) fn render_panes(
             );
             render_copy_mode_cursor(app, frame, info);
         }
+    }
+}
+
+/// Box-drawing glyph for a cell, indexed by N(1)|E(2)|S(4)|W(8) connection bits.
+const DIVIDER_GLYPHS: [&str; 16] = [
+    " ", "│", "─", "└", "│", "│", "┌", "├", "─", "┘", "─", "┴", "┐", "┤", "┬", "┼",
+];
+
+fn divider_line_h(mask: &mut HashMap<(u16, u16), u8>, y: u16, xa: u16, xb: u16) {
+    for x in xa..=xb {
+        let mut bits = 0u8;
+        if x > xa {
+            bits |= 8; // W
+        }
+        if x < xb {
+            bits |= 2; // E
+        }
+        *mask.entry((x, y)).or_insert(0) |= bits;
+    }
+}
+
+fn divider_line_v(mask: &mut HashMap<(u16, u16), u8>, x: u16, ya: u16, yb: u16) {
+    for y in ya..=yb {
+        let mut bits = 0u8;
+        if y > ya {
+            bits |= 1; // N
+        }
+        if y < yb {
+            bits |= 4; // S
+        }
+        *mask.entry((x, y)).or_insert(0) |= bits;
+    }
+}
+
+/// Render single shared separators between panes (divider mode): the outer frame
+/// plus one line per split boundary, joined with box-drawing junction glyphs.
+/// Focus is intentionally not highlighted (shown by the cursor instead).
+fn render_pane_dividers(frame: &mut Frame, area: Rect, splits: &[SplitBorder], color: Color) {
+    if area.width < 2 || area.height < 2 {
+        return;
+    }
+    let x0 = area.x;
+    let y0 = area.y;
+    let x1 = area.x + area.width - 1;
+    let y1 = area.y + area.height - 1;
+
+    let mut mask: HashMap<(u16, u16), u8> = HashMap::new();
+    // No outer frame: only the shared lines between panes (iTerm-style).
+    for sb in splits {
+        match sb.direction {
+            Direction::Horizontal => {
+                let col = sb.pos.saturating_sub(1).clamp(x0, x1);
+                let yb = sb.area.y.saturating_add(sb.area.height).saturating_sub(1);
+                divider_line_v(&mut mask, col, sb.area.y, yb.min(y1));
+            }
+            Direction::Vertical => {
+                let row = sb.pos.saturating_sub(1).clamp(y0, y1);
+                let xb = sb.area.x.saturating_add(sb.area.width).saturating_sub(1);
+                divider_line_h(&mut mask, row, sb.area.x, xb.min(x1));
+            }
+        }
+    }
+
+    let buf = frame.buffer_mut();
+    for ((x, y), bits) in mask {
+        if x > x1 || y > y1 {
+            continue;
+        }
+        let glyph = DIVIDER_GLYPHS[(bits & 0x0F) as usize];
+        if glyph == " " {
+            continue;
+        }
+        let cell = &mut buf[(x, y)];
+        cell.set_symbol(glyph);
+        cell.set_fg(color);
     }
 }
 

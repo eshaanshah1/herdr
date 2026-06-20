@@ -1384,6 +1384,10 @@ pub struct AppState {
     pub pane_scrollback_limit_bytes: usize,
     #[allow(dead_code)] // kept for backward compat; palette.accent is the source of truth
     pub accent: Color,
+    /// Inactive pane border / divider color override; None = palette.overlay0.
+    pub separator_color: Option<Color>,
+    /// Pane separator rendering style: per-pane borders or single shared dividers.
+    pub separator_style: crate::config::PaneSeparators,
     pub sound: SoundConfig,
     pub local_sound_playback: bool,
     pub toast_config: ToastConfig,
@@ -1737,6 +1741,8 @@ impl AppState {
             keybinds: Keybinds::default(),
             spinner_tick: 0,
             palette: Palette::catppuccin(),
+            separator_color: None,
+            separator_style: crate::config::PaneSeparators::Border,
             theme_name: "catppuccin".to_string(),
             theme_runtime: ThemeRuntimeConfig {
                 manual_name: "catppuccin".to_string(),

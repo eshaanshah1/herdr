@@ -264,6 +264,29 @@ pub fn validated_sidebar_bounds(min: u16, max: u16) -> Option<(u16, u16)> {
     }
 }
 
+/// Pane separator rendering style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PaneSeparators {
+    /// Each pane draws its own full border box (current default).
+    #[default]
+    Border,
+    /// A single shared line between adjacent panes.
+    Divider,
+}
+
+/// `[panes]` — how panes are framed.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct PanesConfig {
+    /// Border style between panes: "border" (default) or "divider".
+    pub separators: PaneSeparators,
+    /// Color of inactive pane borders / dividers. Unset = theme's overlay0.
+    /// In "border" mode the focused pane's border still uses `accent`.
+    #[serde(alias = "separator_colour")]
+    pub separator_color: Option<String>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -274,6 +297,7 @@ pub struct Config {
     pub update: UpdateConfig,
     pub keys: KeysConfig,
     pub ui: UiConfig,
+    pub panes: PanesConfig,
     pub worktrees: WorktreesConfig,
     pub advanced: AdvancedConfig,
     pub experimental: ExperimentalConfig,
