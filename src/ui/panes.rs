@@ -164,6 +164,8 @@ pub(super) fn compute_pane_infos(
 
     let multi_pane = ws.layout.pane_count() > 1;
     let terminal_active = app.mode == Mode::Terminal;
+    let divider_mode =
+        multi_pane && app.separator_style == crate::config::PaneSeparators::Divider;
 
     if ws.zoomed {
         let focused_id = ws.layout.focused();
@@ -197,7 +199,20 @@ pub(super) fn compute_pane_infos(
     let mut pane_infos = ws.layout.panes(area);
 
     for info in &mut pane_infos {
-        let pane_inner = if multi_pane {
+        let pane_inner = if !multi_pane {
+            area
+        } else if divider_mode {
+            // Flush content; reserve one cell on interior right/bottom edges
+            // for the shared divider line (the left/top pane yields the column).
+            let mut r = info.rect;
+            if info.rect.x + info.rect.width < area.x + area.width {
+                r.width = r.width.saturating_sub(1);
+            }
+            if info.rect.y + info.rect.height < area.y + area.height {
+                r.height = r.height.saturating_sub(1);
+            }
+            r
+        } else {
             let border_set = if info.is_focused && terminal_active {
                 ratatui::symbols::border::THICK
             } else {
@@ -207,8 +222,6 @@ pub(super) fn compute_pane_infos(
                 .borders(Borders::ALL)
                 .border_set(border_set);
             block.inner(info.rect)
-        } else {
-            area
         };
 
         let mut inner_rect = pane_inner;
@@ -376,10 +389,7 @@ fn render_pane_dividers(frame: &mut Frame, area: Rect, splits: &[SplitBorder], c
     let y1 = area.y + area.height - 1;
 
     let mut mask: HashMap<(u16, u16), u8> = HashMap::new();
-    divider_line_h(&mut mask, y0, x0, x1);
-    divider_line_h(&mut mask, y1, x0, x1);
-    divider_line_v(&mut mask, x0, y0, y1);
-    divider_line_v(&mut mask, x1, y0, y1);
+    // No outer frame: only the shared lines between panes (iTerm-style).
     for sb in splits {
         match sb.direction {
             Direction::Horizontal => {
