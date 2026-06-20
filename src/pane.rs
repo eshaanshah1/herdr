@@ -405,6 +405,55 @@ struct ProcessProbeResult {
     foreground_is_pane_shell: bool,
     agent: Option<Agent>,
     process_name: Option<String>,
+    foreground_command: Option<String>,
+}
+
+/// Display name of the foreground command for use as a pane title, or `None`
+/// when the pane shell itself is in the foreground (nothing is running).
+fn foreground_command_label(
+    job: &crate::platform::ForegroundJob,
+    pane_shell_pid: u32,
+) -> Option<String> {
+    if job.processes.iter().any(|process| process.pid == pane_shell_pid) {
+        return None;
+    }
+    let leader = job
+        .processes
+        .iter()
+        .find(|process| process.pid == job.process_group_id)
+        .or_else(|| job.processes.first())?;
+    let raw = leader.argv0.as_deref().unwrap_or(&leader.name);
+    let name = std::path::Path::new(raw)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(raw)
+        .trim_start_matches('-');
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// Forward a foreground-command change to the app for use as a pane title.
+/// The update is cosmetic, so a full queue drops it rather than blocking the
+/// detector.
+fn report_foreground_command(
+    state_events: &mpsc::Sender<AppEvent>,
+    pane_id: PaneId,
+    command: &Option<String>,
+    last: &mut Option<String>,
+) {
+    if command == last {
+        return;
+    }
+    *last = command.clone();
+    if let Err(err) = state_events.try_send(AppEvent::ForegroundProcessReported {
+        pane_id,
+        command: command.clone(),
+    }) {
+        debug!(
+            pane = pane_id.raw(),
+            err = %err,
+            "failed to send foreground process report"
+        );
+    }
 }
 
 fn agent_hint_for_foreground_job_members(
@@ -450,6 +499,7 @@ fn process_probe_result(
         foreground_is_pane_shell: job.processes.iter().any(|process| process.pid == pid),
         agent: Some(agent),
         process_name: Some(process_name),
+        foreground_command: None,
     }
 }
 
@@ -511,6 +561,7 @@ fn probe_foreground_process_from_jobs(
             foreground_is_pane_shell: job.processes.iter().any(|process| process.pid == pid),
             agent: identified.as_ref().map(|(agent, _)| *agent),
             process_name: identified.map(|(_, process_name)| process_name),
+            foreground_command: foreground_command_label(job, pid),
         };
     }
 
@@ -519,6 +570,7 @@ fn probe_foreground_process_from_jobs(
         foreground_is_pane_shell: false,
         agent: None,
         process_name: None,
+        foreground_command: None,
     }
 }
 
@@ -560,6 +612,7 @@ fn spawn_basic_detection_task(
         let mut last_process_check = std::time::Instant::now();
         let mut last_foreground_pgid = None;
         let mut has_process_probe = false;
+        let mut last_foreground_command: Option<String> = None;
         let mut acquisition_started_at = None;
         let mut last_content_change_at = None;
         let mut pending_foreground_shell_clear = false;
@@ -642,6 +695,12 @@ fn spawn_basic_detection_task(
                 let had_process_probe = has_process_probe;
                 has_process_probe = true;
                 let probe = probe_foreground_process(pid, foreground_pgid);
+                report_foreground_command(
+                    &state_events,
+                    pane_id,
+                    &probe.foreground_command,
+                    &mut last_foreground_command,
+                );
                 let process_group_id = probe.process_group_id;
                 let foreground_is_pane_shell = probe.foreground_is_pane_shell;
                 let mut new_agent = probe.agent;
@@ -1896,6 +1955,7 @@ impl PaneRuntime {
                 let mut last_process_check = Instant::now();
                 let mut last_foreground_pgid = None;
                 let mut has_process_probe = false;
+                let mut last_foreground_command: Option<String> = None;
                 let mut acquisition_started_at = None;
                 let mut last_content_change_at = None;
                 let mut pending_foreground_shell_clear = false;
@@ -1993,6 +2053,12 @@ impl PaneRuntime {
                         has_process_probe = true;
                         if pid > 0 {
                             let probe = probe_foreground_process(pid, foreground_pgid);
+                            report_foreground_command(
+                                &state_events,
+                                pane_id,
+                                &probe.foreground_command,
+                                &mut last_foreground_command,
+                            );
                             let process_name = probe.process_name;
                             let process_group_id = probe.process_group_id;
                             let foreground_is_pane_shell = probe.foreground_is_pane_shell;
@@ -2664,6 +2730,43 @@ impl PaneRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fg_process(pid: u32, name: &str, argv0: Option<&str>) -> crate::platform::ForegroundProcess {
+        crate::platform::ForegroundProcess {
+            pid,
+            name: name.into(),
+            argv0: argv0.map(str::to_string),
+            argv: None,
+            cmdline: None,
+        }
+    }
+
+    #[test]
+    fn foreground_command_label_skips_pane_shell() {
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 100,
+            processes: vec![fg_process(100, "zsh", Some("-zsh"))],
+        };
+        assert_eq!(foreground_command_label(&job, 100), None);
+    }
+
+    #[test]
+    fn foreground_command_label_reports_leader_basename() {
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 200,
+            processes: vec![fg_process(200, "vim", Some("/usr/bin/vim"))],
+        };
+        assert_eq!(foreground_command_label(&job, 100).as_deref(), Some("vim"));
+    }
+
+    #[test]
+    fn foreground_command_label_trims_login_shell_dash() {
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 300,
+            processes: vec![fg_process(300, "bash", Some("-bash"))],
+        };
+        assert_eq!(foreground_command_label(&job, 100).as_deref(), Some("bash"));
+    }
 
     #[test]
     fn shutdown_liveness_treats_reaped_direct_child_as_gone() {

@@ -498,21 +498,7 @@ impl AppState {
             let terminal = self.terminals.get(&pane.attached_terminal_id);
             let pane_number = ws.public_pane_number(pane_id).unwrap_or(0);
             let label = terminal
-                .and_then(|terminal| terminal.effective_title())
-                .or_else(|| {
-                    terminal
-                        .and_then(|terminal| terminal.manual_label.as_deref().map(str::to_string))
-                })
-                .or_else(|| {
-                    terminal.and_then(|terminal| terminal.agent_name.as_deref().map(str::to_string))
-                })
-                .or_else(|| {
-                    terminal
-                        .and_then(|terminal| terminal.effective_agent_label().map(str::to_string))
-                })
-                .or_else(|| {
-                    launch_label(terminal.and_then(|terminal| terminal.launch_argv.as_ref()))
-                })
+                .map(|terminal| terminal.display_label())
                 .unwrap_or_else(|| format!("pane {pane_number}"));
             let display_agent = terminal.and_then(|terminal| terminal.effective_display_agent());
             let agent_label = display_agent.as_deref().or_else(|| {
@@ -759,16 +745,6 @@ fn navigator_state_filter_matches(
 
 fn navigator_matches(query: &str, text: &str) -> bool {
     text_matches_query(query, text)
-}
-
-fn launch_label(argv: Option<&Vec<String>>) -> Option<String> {
-    let argv = argv?;
-    let command = argv.first()?;
-    std::path::Path::new(command)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(str::to_string)
-        .or_else(|| Some(command.clone()))
 }
 
 fn state_label_text(state: AgentState, seen: bool) -> &'static str {
@@ -2538,6 +2514,22 @@ impl AppState {
                 }
                 Vec::new()
             }
+            AppEvent::ForegroundProcessReported { pane_id, command } => {
+                let Some(terminal_id) = self.workspaces.iter().find_map(|ws| {
+                    ws.pane_state(pane_id)
+                        .map(|pane| pane.attached_terminal_id.clone())
+                }) else {
+                    return Vec::new();
+                };
+                let Some(terminal) = self.terminals.get_mut(&terminal_id) else {
+                    return Vec::new();
+                };
+                if terminal.foreground_process != command {
+                    terminal.foreground_process = command;
+                    self.mark_session_dirty();
+                }
+                Vec::new()
+            }
             AppEvent::GitStatusRefreshed {
                 results,
                 cache_updates,
@@ -3349,12 +3341,19 @@ mod tests {
     #[test]
     fn navigator_search_only_matches_visible_row_text() {
         let mut state = app_with_workspaces(&["one"]);
-        state.workspaces[0].identity_cwd = "/tmp/herdr-worktrees/issue-work".into();
+        let pane = state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = state.workspaces[0].terminal_id(pane).cloned().unwrap();
+        state.terminals.get_mut(&terminal_id).unwrap().cwd = "/tmp/herdr-worktrees/issue-work".into();
 
         state.open_navigator();
-        state.navigator.query = "work".into();
-
+        // A shell pane's label falls back to the cwd basename ("issue-work"), but
+        // the rest of the path is not shown — a hidden path segment must not match.
+        state.navigator.query = "worktrees".into();
         assert!(state.navigator_rows().is_empty());
+
+        // The visible basename is searchable.
+        state.navigator.query = "issue-work".into();
+        assert!(!state.navigator_rows().is_empty());
     }
 
     #[test]

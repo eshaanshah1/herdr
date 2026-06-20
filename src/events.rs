@@ -136,6 +136,13 @@ pub enum AppEvent {
         pane_id: PaneId,
         cwd: std::path::PathBuf,
     },
+    /// The pane's foreground command changed. `command` is the running
+    /// command's display name, or `None` when only the pane shell is in the
+    /// foreground (nothing is running).
+    ForegroundProcessReported {
+        pane_id: PaneId,
+        command: Option<String>,
+    },
     /// Background git status refresh completed for workspaces.
     GitStatusRefreshed {
         results: Vec<WorkspaceGitStatus>,

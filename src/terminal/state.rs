@@ -92,6 +92,9 @@ pub struct TerminalState {
     pub launch_argv: Option<Vec<String>>,
     pub respawn_shell_on_exit: bool,
     pub pending_agent_resume_plan: Option<crate::agent_resume::AgentResumePlan>,
+    /// Display name of the command currently running in the pane foreground,
+    /// or `None` when only the pane shell is in the foreground.
+    pub foreground_process: Option<String>,
 }
 
 impl TerminalState {
@@ -118,6 +121,7 @@ impl TerminalState {
             launch_argv: None,
             respawn_shell_on_exit: false,
             pending_agent_resume_plan: None,
+            foreground_process: None,
         }
     }
 
@@ -1119,16 +1123,60 @@ impl TerminalState {
     }
 
     pub fn border_label(&self, show_agent_labels: bool) -> Option<String> {
-        self.effective_title().or_else(|| {
-            self.manual_label.clone().or_else(|| {
-                show_agent_labels
-                    .then(|| {
-                        self.effective_display_agent()
-                            .or_else(|| self.effective_agent_label().map(str::to_string))
-                    })
-                    .flatten()
-            })
-        })
+        self.explicit_label()
+            .or_else(|| show_agent_labels.then(|| self.derived_label()).flatten())
+    }
+
+    /// Full display label for the pane, used wherever a pane needs a title
+    /// (e.g. the navigator). Falls through every signal and finally the
+    /// working directory, so it always yields something.
+    pub fn display_label(&self) -> String {
+        self.explicit_label()
+            .or_else(|| self.derived_label())
+            .unwrap_or_else(|| self.cwd.display().to_string())
+    }
+
+    /// A title the program or user set explicitly: an OSC window title or a
+    /// manual rename. These always take precedence.
+    fn explicit_label(&self) -> Option<String> {
+        self.effective_title().or_else(|| self.manual_label.clone())
+    }
+
+    /// A title herdr derives from what the pane is doing: the agent, else the
+    /// foreground command, else the launch command, else the working directory.
+    fn derived_label(&self) -> Option<String> {
+        self.effective_display_agent()
+            .or_else(|| self.agent_name.clone())
+            .or_else(|| self.effective_agent_label().map(str::to_string))
+            .or_else(|| self.foreground_process.clone())
+            .or_else(|| self.launch_command_label())
+            .or_else(|| self.cwd_label())
+    }
+
+    fn launch_command_label(&self) -> Option<String> {
+        let command = self.launch_argv.as_ref()?.first()?;
+        Some(
+            std::path::Path::new(command)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| command.clone()),
+        )
+    }
+
+    /// The pane working directory as a short title: `~` for home, else the
+    /// directory's own name.
+    fn cwd_label(&self) -> Option<String> {
+        if let Ok(home) = std::env::var("HOME") {
+            if self.cwd == std::path::Path::new(&home) {
+                return Some("~".to_string());
+            }
+        }
+        self.cwd
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
     }
 
     fn recompute_effective_state(
@@ -1185,6 +1233,65 @@ mod tests {
 
     fn test_terminal() -> TerminalState {
         TerminalState::new(TerminalId::alloc(), "/tmp".into())
+    }
+
+    fn terminal_in(cwd: &str) -> TerminalState {
+        TerminalState::new(TerminalId::alloc(), cwd.into())
+    }
+
+    #[test]
+    fn display_label_falls_back_to_cwd_dir_name() {
+        let terminal = terminal_in("/home/me/projects/herdr");
+        assert_eq!(terminal.display_label(), "herdr");
+    }
+
+    #[test]
+    fn display_label_uses_foreground_process_over_cwd() {
+        let mut terminal = terminal_in("/home/me/projects/herdr");
+        terminal.foreground_process = Some("vim".into());
+        assert_eq!(terminal.display_label(), "vim");
+    }
+
+    #[test]
+    fn display_label_prefers_agent_over_foreground_process() {
+        let mut terminal = terminal_in("/home/me/projects/herdr");
+        terminal.foreground_process = Some("node".into());
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        assert_eq!(terminal.display_label(), "claude");
+    }
+
+    #[test]
+    fn display_label_prefers_manual_label_over_process_and_cwd() {
+        let mut terminal = terminal_in("/home/me/projects/herdr");
+        terminal.foreground_process = Some("vim".into());
+        terminal.set_manual_label("notes".into());
+        assert_eq!(terminal.display_label(), "notes");
+    }
+
+    #[test]
+    fn border_label_hides_derived_label_unless_opted_in() {
+        let mut terminal = terminal_in("/home/me/projects/herdr");
+        terminal.foreground_process = Some("vim".into());
+        assert_eq!(terminal.border_label(false), None);
+        assert_eq!(terminal.border_label(true).as_deref(), Some("vim"));
+    }
+
+    #[test]
+    fn border_label_always_shows_manual_label() {
+        let mut terminal = terminal_in("/home/me/projects/herdr");
+        terminal.foreground_process = Some("vim".into());
+        terminal.set_manual_label("notes".into());
+        assert_eq!(terminal.border_label(false).as_deref(), Some("notes"));
+    }
+
+    #[test]
+    fn cwd_label_renders_home_as_tilde() {
+        if let Ok(home) = std::env::var("HOME") {
+            if !home.is_empty() {
+                let terminal = terminal_in(&home);
+                assert_eq!(terminal.display_label(), "~");
+            }
+        }
     }
 
     fn test_session_path(name: &str) -> String {
