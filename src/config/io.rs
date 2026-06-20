@@ -292,6 +292,14 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
         &mut invalid_sections,
         |section| config.remote = section,
     );
+    load_live_section(
+        table,
+        "panes",
+        "panes config",
+        &mut diagnostics,
+        &mut invalid_sections,
+        |section| config.panes = section,
+    );
 
     Ok(LoadedConfig {
         config,
