@@ -1,18 +1,53 @@
-# herdr task runner
+# herdr task runner — FORK-LOCAL (do not upstream this justfile).
+#
+# The dev-loop recipes (test/build/lint) run in the Apple `container` Linux
+# builder when that CLI is present (this Mac — whose host zig toolchain CANNOT
+# link a macOS binary, so host cargo is useless here even though it's installed),
+# and otherwise run cargo on the host (CI, Linux, pre-commit). The container path
+# produces a LINUX binary for verification only — the runnable macOS binary comes
+# from fork CI. CI/release/docs/hooks recipes are otherwise upstream.
 
-# Run tests
+MEM := "8g"
+CPUS := "8"
+
+# Run a command in the Apple `container` linux builder when available, else on
+# the host. Detection keys on the `container` CLI, NOT on `cargo`: this Mac has
+# cargo but can't link macOS natively, so host builds must be avoided here; CI
+# runners have no `container` and correctly use host cargo. The container path
+# stops orphaned builder containers first — an interrupted `container run` never
+# reaches `--rm`, and its leftover keeps the cache volumes attached, breaking the
+# next run with "storage device attachment is invalid". (Container uses `bash -c`,
+# not `-lc`: the image's login profile drops cargo from PATH.)
+_c cmd:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v container >/dev/null 2>&1; then
+        exec bash -c '{{cmd}}'
+    fi
+    ids=$(container ls 2>/dev/null | awk 'NR>1 && $2 ~ /herdr-builder/ {print $1}')
+    for id in $ids; do echo "stopping orphaned builder $id" >&2; container stop "$id" >/dev/null 2>&1 || true; done
+    exec container run --rm --memory {{MEM}} --cpus {{CPUS}} \
+      -v "$PWD":/work -w /work \
+      -v herdr-cargo:/usr/local/cargo/registry -v herdr-target:/target \
+      -e CARGO_TARGET_DIR=/target herdr-builder bash -c '{{cmd}}'
+
+# Stop orphaned builder containers
+clean:
+    #!/usr/bin/env bash
+    ids=$(container ls 2>/dev/null | awk 'NR>1 && $2 ~ /herdr-builder/ {print $1}')
+    if [ -n "$ids" ]; then for id in $ids; do echo "stopping $id"; container stop "$id" >/dev/null 2>&1 || true; done; else echo "no builder containers running"; fi
+
+# Run tests (host cargo, else linux builder; uses cargo test — no nextest in the image)
 test:
-    cargo nextest run --locked --status-level fail --final-status-level fail --failure-output final --success-output never
-    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_preview scripts.test_vendor_libghostty_vt
+    just _c "cargo test --locked"
 
-# Run one nextest filter, e.g. `just test-one codex_stale_working`
+# Run one test filter, e.g. `just test-one codex_stale_working`
 test-one filter:
-    cargo nextest run --locked "{{filter}}" --status-level fail --final-status-level fail --failure-output final --success-output never
+    just _c "cargo test --locked {{filter}}"
 
-# Run fast local lint checks
+# Run fast lint checks (host cargo, else linux builder)
 lint:
-    cargo fmt --check
-    cargo clippy --all-targets --locked -- -D warnings
+    just _c "cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings"
 
 # Run PR CI checks
 ci filter='all()': lint
@@ -35,9 +70,9 @@ install-hooks:
     chmod +x .githooks/commit-msg
     @echo "installed git hooks from .githooks"
 
-# Build release binary
+# Compile-check (host cargo, else linux builder; debug build for verification)
 build:
-    cargo build --release --locked
+    just _c "cargo build --locked"
 
 # Build the website and documentation
 website-build:
