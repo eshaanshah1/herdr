@@ -143,16 +143,54 @@ fn render_rows(
     let rows = app.navigator_rows_from(terminal_runtimes);
     let start = app.navigator.scroll.min(rows.len());
     let end = rows.len().min(start.saturating_add(body.height as usize));
-    for (visible_idx, row) in rows[start..end].iter().enumerate() {
+    for visible_idx in 0..end.saturating_sub(start) {
         let idx = start + visible_idx;
         let y = body.y + visible_idx as u16;
         let rect = Rect::new(body.x, y, body.width, 1);
         let selected = idx == app.navigator.selected;
-        render_row(app, frame, rect, row, selected);
+        render_row(app, frame, rect, &rows, idx, selected);
     }
 }
 
-fn render_row(app: &AppState, frame: &mut Frame, rect: Rect, row: &NavigatorRow, selected: bool) {
+/// Whether a later row at `depth` shares the same parent as the row at `idx`,
+/// i.e. the branch at this level continues below (`├`/`│`) rather than ending (`└`).
+fn navigator_branch_continues(rows: &[NavigatorRow], idx: usize, depth: u8) -> bool {
+    rows[idx + 1..]
+        .iter()
+        .find(|row| row.depth <= depth)
+        .is_some_and(|row| row.depth == depth)
+}
+
+fn navigator_tree_prefix(rows: &[NavigatorRow], idx: usize) -> String {
+    let row = &rows[idx];
+    if row.is_workspace {
+        return if row.expanded { "▾" } else { "▸" }.to_string();
+    }
+    let mut prefix = String::new();
+    for ancestor in 1..row.depth {
+        prefix.push_str(if navigator_branch_continues(rows, idx, ancestor) {
+            "│ "
+        } else {
+            "  "
+        });
+    }
+    prefix.push_str(if navigator_branch_continues(rows, idx, row.depth) {
+        "├─"
+    } else {
+        "└─"
+    });
+    prefix
+}
+
+fn render_row(
+    app: &AppState,
+    frame: &mut Frame,
+    rect: Rect,
+    rows: &[NavigatorRow],
+    idx: usize,
+    selected: bool,
+) {
+    let row = &rows[idx];
     let p = &app.palette;
     frame.render_widget(Clear, rect);
     let base_style = if selected {
@@ -182,21 +220,9 @@ fn render_row(app: &AppState, frame: &mut Frame, rect: Rect, row: &NavigatorRow,
         status_style.bg(p.panel_bg)
     };
 
-    let prefix = if row.is_workspace {
-        if row.expanded {
-            "▾"
-        } else {
-            "▸"
-        }
-    } else if row.depth > 0 {
-        "├─"
-    } else {
-        "  "
-    };
     let current = if row.is_current { "◆" } else { " " };
-    let marker = if selected { "→" } else { " " };
-    let indent = "  ".repeat(row.depth as usize);
-    let left_fixed = format!(" {indent}{prefix} {marker} {current} ");
+    let tree = navigator_tree_prefix(rows, idx);
+    let left_fixed = format!(" {current} {tree} ");
     let meta_width = metadata_width(rect.width);
     let left_budget = rect
         .width
