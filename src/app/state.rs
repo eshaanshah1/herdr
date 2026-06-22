@@ -784,6 +784,16 @@ pub(crate) enum NavigatorTarget {
     },
 }
 
+impl NavigatorTarget {
+    pub(crate) fn ws_idx(&self) -> usize {
+        match self {
+            NavigatorTarget::Workspace { ws_idx }
+            | NavigatorTarget::Tab { ws_idx, .. }
+            | NavigatorTarget::Pane { ws_idx, .. } => *ws_idx,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NavigatorRow {
     pub target: NavigatorTarget,

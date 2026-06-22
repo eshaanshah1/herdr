@@ -646,18 +646,23 @@ impl AppState {
         self.accept_navigator_selection_from(&terminal_runtimes)
     }
 
+    pub(crate) fn selected_navigator_target_from(
+        &self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    ) -> Option<NavigatorTarget> {
+        self.navigator_rows_from(terminal_runtimes)
+            .get(self.navigator.selected)
+            .map(|row| row.target.clone())
+    }
+
     pub(crate) fn accept_navigator_selection_from(
         &mut self,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
     ) -> bool {
-        let Some(row) = self
-            .navigator_rows_from(terminal_runtimes)
-            .get(self.navigator.selected)
-            .cloned()
-        else {
+        let Some(target) = self.selected_navigator_target_from(terminal_runtimes) else {
             return false;
         };
-        self.focus_navigator_target(row.target)
+        self.focus_navigator_target(target)
     }
 
     pub(crate) fn focus_navigator_target(&mut self, target: NavigatorTarget) -> bool {

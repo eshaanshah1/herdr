@@ -4,6 +4,7 @@ use ratatui::layout::{Direction, Rect};
 use crate::{
     app::state::{
         AppState, ContextMenuKind, ContextMenuState, MenuListState, Mode, NavigatorStateFilter,
+        NavigatorTarget,
     },
     input::TerminalKey,
     layout::NavDirection,
@@ -234,10 +235,22 @@ pub(crate) fn handle_navigator_key(
             state.navigator.state_filter = Some(NavigatorStateFilter::Blocked);
             state.clamp_navigator_selection_from(terminal_runtimes);
         }
-        KeyCode::Char('w') if key.modifiers.is_empty() => {
+        KeyCode::Char('W') => {
             state.navigator.query.clear();
             state.navigator.state_filter = Some(NavigatorStateFilter::Working);
             state.clamp_navigator_selection_from(terminal_runtimes);
+        }
+        KeyCode::Char('c') if key.modifiers.is_empty() => {
+            navigator_add_tab(state, terminal_runtimes);
+        }
+        KeyCode::Char('w') if key.modifiers.is_empty() => {
+            navigator_new_workspace(state);
+        }
+        KeyCode::Char('r') if key.modifiers.is_empty() => {
+            navigator_rename_selected(state, terminal_runtimes);
+        }
+        KeyCode::Char('x') if key.modifiers.is_empty() => {
+            navigator_close_selected(state, terminal_runtimes);
         }
         KeyCode::Char('i') if key.modifiers.is_empty() => {
             state.navigator.query.clear();
@@ -366,6 +379,124 @@ pub(super) fn open_new_tab_dialog(state: &mut AppState) {
     state.name_input = next_new_tab_default_name(state);
     state.name_input_replace_on_type = true;
     state.mode = Mode::RenameTab;
+}
+
+fn navigator_pane_exists(
+    state: &AppState,
+    ws_idx: usize,
+    tab_idx: usize,
+    pane_id: crate::layout::PaneId,
+) -> bool {
+    state
+        .workspaces
+        .get(ws_idx)
+        .and_then(|ws| ws.tabs.get(tab_idx))
+        .is_some_and(|tab| tab.panes.contains_key(&pane_id))
+}
+
+pub(super) fn navigator_add_tab(
+    state: &mut AppState,
+    terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+) {
+    let Some(target) = state.selected_navigator_target_from(terminal_runtimes) else {
+        return;
+    };
+    let ws_idx = target.ws_idx();
+    if ws_idx >= state.workspaces.len() {
+        return;
+    }
+    state.switch_workspace(ws_idx);
+    if state.prompt_new_tab_name {
+        open_new_tab_dialog(state);
+    } else {
+        state.request_new_tab = true;
+        leave_modal(state);
+    }
+}
+
+pub(super) fn navigator_new_workspace(state: &mut AppState) {
+    state.request_new_workspace = true;
+    leave_modal(state);
+}
+
+pub(super) fn navigator_rename_selected(
+    state: &mut AppState,
+    terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+) {
+    let Some(target) = state.selected_navigator_target_from(terminal_runtimes) else {
+        return;
+    };
+    match target {
+        NavigatorTarget::Workspace { ws_idx } => {
+            if ws_idx >= state.workspaces.len() {
+                return;
+            }
+            open_rename_workspace(state, terminal_runtimes, ws_idx);
+        }
+        NavigatorTarget::Tab { ws_idx, tab_idx } => {
+            if !state.switch_workspace_tab(ws_idx, tab_idx) {
+                return;
+            }
+            open_rename_active_tab(state, false);
+        }
+        NavigatorTarget::Pane {
+            ws_idx,
+            tab_idx,
+            pane_id,
+        } => {
+            if !navigator_pane_exists(state, ws_idx, tab_idx, pane_id) {
+                return;
+            }
+            state.switch_workspace(ws_idx);
+            state.focus_pane_in_workspace(ws_idx, pane_id);
+            open_rename_pane(state, pane_id);
+        }
+    }
+}
+
+pub(super) fn navigator_close_selected(
+    state: &mut AppState,
+    terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+) {
+    let Some(target) = state.selected_navigator_target_from(terminal_runtimes) else {
+        return;
+    };
+    match target {
+        NavigatorTarget::Workspace { ws_idx } => {
+            if ws_idx >= state.workspaces.len() {
+                return;
+            }
+            state.selected = ws_idx;
+            if state.confirm_close {
+                open_confirm_close(state);
+            } else {
+                state.close_selected_workspace();
+                leave_modal(state);
+            }
+        }
+        NavigatorTarget::Tab { ws_idx, tab_idx } => {
+            if !state.switch_workspace_tab(ws_idx, tab_idx) {
+                return;
+            }
+            if !state.close_tab() {
+                leave_modal(state);
+            }
+        }
+        NavigatorTarget::Pane {
+            ws_idx,
+            tab_idx,
+            pane_id,
+        } => {
+            if !navigator_pane_exists(state, ws_idx, tab_idx, pane_id) {
+                return;
+            }
+            state.switch_workspace(ws_idx);
+            state.focus_pane_in_workspace(ws_idx, pane_id);
+            if !state.close_pane() {
+                leave_modal(state);
+            }
+        }
+    }
 }
 
 pub(super) fn leave_modal(state: &mut AppState) {
@@ -1478,5 +1609,168 @@ mod tests {
         assert_eq!(state.selected, 0);
         assert_eq!(state.mode, Mode::ConfirmClose);
         assert_eq!(state.workspaces.len(), 2);
+    }
+
+    fn navigator_state(names: &[&str]) -> (AppState, crate::terminal::TerminalRuntimeRegistry) {
+        let mut state = state_with_workspaces(names);
+        state.prompt_new_tab_name = true;
+        state.ensure_test_terminals();
+        let rt = crate::terminal::TerminalRuntimeRegistry::new();
+        state.open_navigator();
+        let ids: Vec<String> = state.workspaces.iter().map(|ws| ws.id.clone()).collect();
+        for id in ids {
+            state.navigator.expanded_workspaces.insert(id);
+        }
+        (state, rt)
+    }
+
+    fn select_navigator_row(
+        state: &mut AppState,
+        rt: &crate::terminal::TerminalRuntimeRegistry,
+        pred: impl Fn(&NavigatorTarget) -> bool,
+    ) {
+        let pos = state
+            .navigator_rows_from(rt)
+            .iter()
+            .position(|row| pred(&row.target))
+            .expect("expected a matching navigator row");
+        state.navigator.selected = pos;
+    }
+
+    #[test]
+    fn navigator_c_adds_tab_to_selected_rows_workspace() {
+        let (mut state, rt) = navigator_state(&["one", "two"]);
+        let pane = state.workspaces[1].tabs[0].root_pane;
+        select_navigator_row(
+            &mut state,
+            &rt,
+            |target| matches!(target, NavigatorTarget::Pane { pane_id, .. } if *pane_id == pane),
+        );
+
+        handle_navigator_key(
+            &mut state,
+            &rt,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.active, Some(1));
+        assert_eq!(state.mode, Mode::RenameTab);
+        assert!(state.creating_new_tab);
+    }
+
+    #[test]
+    fn navigator_w_requests_new_workspace_and_leaves_modal() {
+        let (mut state, rt) = navigator_state(&["one"]);
+
+        handle_navigator_key(
+            &mut state,
+            &rt,
+            KeyEvent::new(KeyCode::Char('w'), KeyModifiers::empty()),
+        );
+
+        assert!(state.request_new_workspace);
+        assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn navigator_shift_w_sets_working_state_filter() {
+        let (mut state, rt) = navigator_state(&["one"]);
+
+        handle_navigator_key(
+            &mut state,
+            &rt,
+            KeyEvent::new(KeyCode::Char('W'), KeyModifiers::SHIFT),
+        );
+
+        assert_eq!(
+            state.navigator.state_filter,
+            Some(NavigatorStateFilter::Working)
+        );
+        assert_eq!(state.mode, Mode::Navigator);
+        assert!(!state.request_new_workspace);
+    }
+
+    #[test]
+    fn navigator_r_on_workspace_row_opens_rename_workspace() {
+        let (mut state, rt) = navigator_state(&["one", "two"]);
+        select_navigator_row(
+            &mut state,
+            &rt,
+            |target| matches!(target, NavigatorTarget::Workspace { ws_idx } if *ws_idx == 1),
+        );
+
+        handle_navigator_key(
+            &mut state,
+            &rt,
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.mode, Mode::RenameWorkspace);
+        assert_eq!(state.selected, 1);
+    }
+
+    #[test]
+    fn navigator_r_on_pane_row_opens_rename_pane_in_that_workspace() {
+        let (mut state, rt) = navigator_state(&["one", "two"]);
+        let pane = state.workspaces[1].tabs[0].root_pane;
+        select_navigator_row(
+            &mut state,
+            &rt,
+            |target| matches!(target, NavigatorTarget::Pane { pane_id, .. } if *pane_id == pane),
+        );
+
+        handle_navigator_key(
+            &mut state,
+            &rt,
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.mode, Mode::RenamePane);
+        assert_eq!(state.active, Some(1));
+        assert_eq!(state.rename_pane_target, Some(pane));
+    }
+
+    #[test]
+    fn navigator_x_closes_selected_pane() {
+        let mut state = state_with_workspaces(&["one"]);
+        let victim = state.workspaces[0].test_split(Direction::Horizontal);
+        state.ensure_test_terminals();
+        let rt = crate::terminal::TerminalRuntimeRegistry::new();
+        state.open_navigator();
+        let id = state.workspaces[0].id.clone();
+        state.navigator.expanded_workspaces.insert(id);
+        select_navigator_row(
+            &mut state,
+            &rt,
+            |target| matches!(target, NavigatorTarget::Pane { pane_id, .. } if *pane_id == victim),
+        );
+
+        handle_navigator_key(
+            &mut state,
+            &rt,
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty()),
+        );
+
+        assert!(!state.workspaces[0].tabs[0].panes.contains_key(&victim));
+        assert_eq!(state.workspaces.len(), 1);
+        assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn navigator_crud_keys_type_into_search_when_focused() {
+        let (mut state, rt) = navigator_state(&["one"]);
+        state.navigator.search_focused = true;
+
+        for c in ['c', 'w', 'r', 'x'] {
+            handle_navigator_key(
+                &mut state,
+                &rt,
+                KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty()),
+            );
+        }
+
+        assert_eq!(state.navigator.query, "cwrx");
+        assert_eq!(state.mode, Mode::Navigator);
+        assert!(!state.request_new_workspace);
     }
 }
