@@ -219,10 +219,14 @@ fn compute_view_internal(
 
     let tab_bar_view = app
         .active
-        .and_then(|i| app.workspaces.get(i))
-        .map(|ws| {
+        .and_then(|i| Some((i, app.workspaces.get(i)?)))
+        .map(|(i, ws)| {
+            let tab_labels: Vec<String> = (0..ws.tabs.len())
+                .map(|idx| app.tab_chrome_name(i, idx))
+                .collect();
             compute_tab_bar_view(
                 ws,
+                &tab_labels,
                 tab_bar_rect,
                 app.tab_scroll,
                 app.tab_scroll_follow_active,

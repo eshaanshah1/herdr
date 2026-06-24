@@ -95,6 +95,9 @@ pub struct TerminalState {
     /// Display name of the command currently running in the pane foreground,
     /// or `None` when only the pane shell is in the foreground.
     pub foreground_process: Option<String>,
+    /// Terminal title the pane child set via OSC 0/2 (e.g. Claude Code's
+    /// session title). Ephemeral runtime state: re-emitted live, not persisted.
+    pub osc_title: Option<String>,
 }
 
 impl TerminalState {
@@ -122,6 +125,7 @@ impl TerminalState {
             respawn_shell_on_exit: false,
             pending_agent_resume_plan: None,
             foreground_process: None,
+            osc_title: None,
         }
     }
 
@@ -1113,6 +1117,7 @@ impl TerminalState {
         self.launch_argv = None;
         self.respawn_shell_on_exit = false;
         self.pending_agent_resume_plan = None;
+        self.osc_title = None;
         self.clear_agent_name();
     }
 
@@ -1136,10 +1141,14 @@ impl TerminalState {
             .unwrap_or_else(|| self.cwd.display().to_string())
     }
 
-    /// A title the program or user set explicitly: an OSC window title or a
-    /// manual rename. These always take precedence.
-    fn explicit_label(&self) -> Option<String> {
-        self.effective_title().or_else(|| self.manual_label.clone())
+    /// A title the program or user set explicitly: a hook-reported title, a
+    /// manual rename, or an OSC window title. These always take precedence over
+    /// anything herdr derives. A manual rename beats a program-set OSC title so
+    /// an explicit user override is never clobbered by the running agent.
+    pub(crate) fn explicit_label(&self) -> Option<String> {
+        self.effective_title()
+            .or_else(|| self.manual_label.clone())
+            .or_else(|| self.osc_title.clone())
     }
 
     /// A title herdr derives from what the pane is doing: the agent, else the
@@ -1282,6 +1291,41 @@ mod tests {
         terminal.foreground_process = Some("vim".into());
         terminal.set_manual_label("notes".into());
         assert_eq!(terminal.border_label(false).as_deref(), Some("notes"));
+    }
+
+    #[test]
+    fn display_label_prefers_osc_title_over_agent_and_cwd() {
+        let mut terminal = terminal_in("/home/me/projects/herdr");
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal.osc_title = Some("refactor the parser".into());
+        assert_eq!(terminal.display_label(), "refactor the parser");
+    }
+
+    #[test]
+    fn display_label_prefers_manual_label_over_osc_title() {
+        let mut terminal = terminal_in("/home/me/projects/herdr");
+        terminal.osc_title = Some("program title".into());
+        terminal.set_manual_label("notes".into());
+        assert_eq!(terminal.display_label(), "notes");
+    }
+
+    #[test]
+    fn border_label_always_shows_osc_title() {
+        let mut terminal = terminal_in("/home/me/projects/herdr");
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal.osc_title = Some("session title".into());
+        assert_eq!(
+            terminal.border_label(false).as_deref(),
+            Some("session title")
+        );
+    }
+
+    #[test]
+    fn respawn_clears_osc_title() {
+        let mut terminal = terminal_in("/home/me/projects/herdr");
+        terminal.osc_title = Some("stale title".into());
+        terminal.clear_agent_runtime_identity_after_respawn();
+        assert_eq!(terminal.osc_title, None);
     }
 
     #[test]

@@ -448,12 +448,44 @@ impl AppState {
         rows
     }
 
+    /// The OSC/manual/hook title the tab's focused pane is showing, if any,
+    /// capped for use as a compact tab label. Surfaces a program-set title
+    /// (e.g. Claude Code's session title) in the tab bar and navigator.
+    fn tab_focused_explicit_title(&self, ws_idx: usize, tab_idx: usize) -> Option<String> {
+        let ws = self.workspaces.get(ws_idx)?;
+        let tab = ws.tabs.get(tab_idx)?;
+        let pane_id = tab.layout.focused();
+        let terminal_id = tab.panes.get(&pane_id)?.attached_terminal_id.clone();
+        let title = self.terminals.get(&terminal_id)?.explicit_label()?;
+        Some(truncate_tab_name(&title))
+    }
+
+    /// Display name for a tab in the tab bar / navigator: a user-set custom
+    /// name, else the focused pane's explicit (OSC) title, else the number.
+    pub(crate) fn tab_chrome_name(&self, ws_idx: usize, tab_idx: usize) -> String {
+        self.workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.tabs.get(tab_idx))
+            .and_then(|tab| tab.custom_name.clone())
+            .or_else(|| self.tab_focused_explicit_title(ws_idx, tab_idx))
+            .unwrap_or_else(|| (tab_idx + 1).to_string())
+    }
+
+    /// Whether the tab shows only its auto-assigned number (no custom name and
+    /// no program-set title), used to dim placeholder tabs in the tab bar.
+    pub(crate) fn tab_is_auto_named(&self, ws_idx: usize, tab_idx: usize) -> bool {
+        let has_custom = self
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.tabs.get(tab_idx))
+            .is_some_and(|tab| tab.custom_name.is_some());
+        !has_custom && self.tab_focused_explicit_title(ws_idx, tab_idx).is_none()
+    }
+
     fn navigator_tab_row(&self, ws_idx: usize, tab_idx: usize) -> NavigatorRow {
         let ws = &self.workspaces[ws_idx];
         let tab = &ws.tabs[tab_idx];
-        let label = ws
-            .tab_display_name(tab_idx)
-            .unwrap_or_else(|| (tab_idx + 1).to_string());
+        let label = self.tab_chrome_name(ws_idx, tab_idx);
         let (status, seen) = tab_aggregate_state(tab, &self.terminals);
         let activity = tab_activity_summary(tab, &self.terminals);
         let pane_count = tab.panes.len();
@@ -750,6 +782,23 @@ fn navigator_state_filter_matches(
 
 fn navigator_matches(query: &str, text: &str) -> bool {
     text_matches_query(query, text)
+}
+
+/// Upper bound on characters shown for a program-set tab name. OSC titles are
+/// untrusted child output and can be long; the tab bar sizes each tab to its
+/// label, so cap the source to keep one tab from dominating the bar.
+const TAB_NAME_MAX_CHARS: usize = 24;
+
+fn truncate_tab_name(name: &str) -> String {
+    let name = name.trim();
+    if name.chars().count() <= TAB_NAME_MAX_CHARS {
+        return name.to_string();
+    }
+    let prefix: String = name
+        .chars()
+        .take(TAB_NAME_MAX_CHARS.saturating_sub(1))
+        .collect();
+    format!("{prefix}…")
 }
 
 fn state_label_text(state: AgentState, seen: bool) -> &'static str {
@@ -1462,7 +1511,10 @@ impl AppState {
 
     fn refresh_tab_bar_view(&mut self) {
         let area = self.view.tab_bar_rect;
-        let Some(ws) = self.active.and_then(|idx| self.workspaces.get(idx)) else {
+        let Some(ws_idx) = self
+            .active
+            .filter(|&idx| self.workspaces.get(idx).is_some())
+        else {
             self.tab_scroll = 0;
             self.view.tab_hit_areas.clear();
             self.view.tab_scroll_left_hit_area = ratatui::layout::Rect::default();
@@ -1470,9 +1522,13 @@ impl AppState {
             self.view.new_tab_hit_area = ratatui::layout::Rect::default();
             return;
         };
+        let tab_labels: Vec<String> = (0..self.workspaces[ws_idx].tabs.len())
+            .map(|idx| self.tab_chrome_name(ws_idx, idx))
+            .collect();
 
         let layout = crate::ui::compute_tab_bar_view(
-            ws,
+            &self.workspaces[ws_idx],
+            &tab_labels,
             area,
             self.tab_scroll,
             self.tab_scroll_follow_active,
@@ -2535,6 +2591,22 @@ impl AppState {
                 }
                 Vec::new()
             }
+            AppEvent::OscTitleReported { pane_id, title } => {
+                let Some(terminal_id) = self.workspaces.iter().find_map(|ws| {
+                    ws.pane_state(pane_id)
+                        .map(|pane| pane.attached_terminal_id.clone())
+                }) else {
+                    return Vec::new();
+                };
+                let Some(terminal) = self.terminals.get_mut(&terminal_id) else {
+                    return Vec::new();
+                };
+                if terminal.osc_title != title {
+                    terminal.osc_title = title;
+                    self.mark_session_dirty();
+                }
+                Vec::new()
+            }
             AppEvent::GitStatusRefreshed {
                 results,
                 cache_updates,
@@ -2941,6 +3013,66 @@ mod tests {
             checkout_path: "/repo/herdr".into(),
             is_linked_worktree: false,
         });
+    }
+
+    #[test]
+    fn osc_title_report_surfaces_in_pane_and_tab_labels() {
+        let mut state = app_with_workspaces(&["test"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+
+        state.handle_app_event(AppEvent::OscTitleReported {
+            pane_id,
+            title: Some("fix the parser".into()),
+        });
+
+        let terminal_id = state.workspaces[0]
+            .panes
+            .get(&pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        assert_eq!(
+            state.terminals.get(&terminal_id).unwrap().display_label(),
+            "fix the parser"
+        );
+        assert_eq!(state.tab_chrome_name(0, 0), "fix the parser");
+        assert!(!state.tab_is_auto_named(0, 0));
+    }
+
+    #[test]
+    fn tab_without_program_title_stays_numbered() {
+        let state = app_with_workspaces(&["test"]);
+        assert_eq!(state.tab_chrome_name(0, 0), "1");
+        assert!(state.tab_is_auto_named(0, 0));
+    }
+
+    #[test]
+    fn custom_tab_name_beats_osc_title() {
+        let mut state = app_with_workspaces(&["test"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        state.workspaces[0].tabs[0].set_custom_name("notes".into());
+        state.handle_app_event(AppEvent::OscTitleReported {
+            pane_id,
+            title: Some("osc title".into()),
+        });
+        assert_eq!(state.tab_chrome_name(0, 0), "notes");
+        assert!(!state.tab_is_auto_named(0, 0));
+    }
+
+    #[test]
+    fn osc_title_clear_reverts_tab_to_number() {
+        let mut state = app_with_workspaces(&["test"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        state.handle_app_event(AppEvent::OscTitleReported {
+            pane_id,
+            title: Some("temp".into()),
+        });
+        state.handle_app_event(AppEvent::OscTitleReported {
+            pane_id,
+            title: None,
+        });
+        assert_eq!(state.tab_chrome_name(0, 0), "1");
+        assert!(state.tab_is_auto_named(0, 0));
     }
 
     #[test]

@@ -456,6 +456,30 @@ fn report_foreground_command(
     }
 }
 
+/// Forward an OSC 0/2 terminal-title change to the app for use as a pane title.
+/// `title` is the raw OSC payload (`""` when none); an empty payload clears the
+/// stored title. Cosmetic like the foreground report, so a full queue drops it
+/// rather than blocking the detector.
+fn report_osc_title(
+    state_events: &mpsc::Sender<AppEvent>,
+    pane_id: PaneId,
+    title: &str,
+    last: &mut Option<String>,
+) {
+    let title = (!title.is_empty()).then(|| title.to_string());
+    if title == *last {
+        return;
+    }
+    *last = title.clone();
+    if let Err(err) = state_events.try_send(AppEvent::OscTitleReported { pane_id, title }) {
+        debug!(
+            pane = pane_id.raw(),
+            err = %err,
+            "failed to send osc title report"
+        );
+    }
+}
+
 fn agent_hint_for_foreground_job_members(
     job: &crate::platform::ForegroundJob,
     read_hint: impl Fn(u32) -> Option<Agent>,
@@ -613,6 +637,7 @@ fn spawn_basic_detection_task(
         let mut last_foreground_pgid = None;
         let mut has_process_probe = false;
         let mut last_foreground_command: Option<String> = None;
+        let mut last_osc_title: Option<String> = None;
         let mut acquisition_started_at = None;
         let mut last_content_change_at = None;
         let mut pending_foreground_shell_clear = false;
@@ -842,6 +867,7 @@ fn spawn_basic_detection_task(
 
             let osc_title = terminal.agent_osc_title();
             let osc_progress = terminal.agent_osc_progress();
+            report_osc_title(&state_events, pane_id, &osc_title, &mut last_osc_title);
             let Some(screen_detection) = detection_update_for_publish_with_osc(
                 agent,
                 &content,
@@ -1956,6 +1982,7 @@ impl PaneRuntime {
                 let mut last_foreground_pgid = None;
                 let mut has_process_probe = false;
                 let mut last_foreground_command: Option<String> = None;
+                let mut last_osc_title: Option<String> = None;
                 let mut acquisition_started_at = None;
                 let mut last_content_change_at = None;
                 let mut pending_foreground_shell_clear = false;
@@ -2236,6 +2263,7 @@ impl PaneRuntime {
 
                     let osc_title = terminal.agent_osc_title();
                     let osc_progress = terminal.agent_osc_progress();
+                    report_osc_title(&state_events, pane_id, &osc_title, &mut last_osc_title);
                     let Some(screen_detection) = detection_update_for_publish_with_osc(
                         agent,
                         &content,

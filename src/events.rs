@@ -143,6 +143,13 @@ pub enum AppEvent {
         pane_id: PaneId,
         command: Option<String>,
     },
+    /// The pane child set its terminal title via OSC 0/2 (e.g. Claude Code
+    /// renaming the tab to its session title). `title` is the sanitized
+    /// payload, or `None` when the title was cleared.
+    OscTitleReported {
+        pane_id: PaneId,
+        title: Option<String>,
+    },
     /// Background git status refresh completed for workspaces.
     GitStatusRefreshed {
         results: Vec<WorkspaceGitStatus>,
